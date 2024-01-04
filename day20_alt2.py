@@ -1,4 +1,14 @@
+"""
+
+Este metodo eh muito mais simples que o outro. Eu prefiro este, que
+funciona bem para os dois exemplos, mas não para a parte 1... estranho.
+
+"""
+# %%
 from abc import abstractmethod
+from collections import OrderedDict
+
+# %%
 
 
 class Module:
@@ -10,6 +20,12 @@ class Module:
     pulse is sent to modules a, b, and c, and then module a processes
     its pulse and sends more pulses, the pulses sent to modules b and c
     would have to be handled first.
+
+    Design: pulses are transmitted in 2 stages. In the first stage,
+    self.output_signal is put to every output_module's input_stack,
+    this is done by calling self.send(). In the second stage, each
+    module processes its input_stack, and updates its own
+    output_signal, this is done by calling self.tick().
     """
 
     def __init__(self, name):
@@ -21,7 +37,10 @@ class Module:
         # can be None, True, or False
         # low pulse is True, high pulse is False
         # Note that stack behaves differently for each module
-        self.stack = []
+        self.input_stack = OrderedDict()
+
+        # signal to be sent to output modules in each tick
+        self.output_signal = None
 
         # counter for low and high pulses sent
         self.counter = [0, 0]
@@ -35,14 +54,26 @@ class Module:
     def set_output_modules(self, output_modules):
         self.output_modules = output_modules
 
-    @abstractmethod
     def send(self):
-        # send signals from own stack to output modules' stack
-        raise NotImplementedError
+        # send output signal to output modules' stacks
+        if self.output_signal is None:
+            return
+        for out in self.output_modules:
+            if VERBOSE:
+                print(f"{self.name} sent {self.output_signal} to {out.name}")
+            self.counter[0 if self.output_signal else 1] += 1
+            out.put(self.output_signal, self)
+
+    def put(self, signal, sender):
+        # put signal to own's input stack
+        if VERBOSE:
+            print(f"{self.name} received {signal} from {sender.name}")
+        self.input_stack[sender] = signal
 
     @abstractmethod
-    def receive(self, low_pulse, from_module):
-        # receive signals from input modules and save them to a stack
+    def tick(self):
+        # process own input stack and update output signal
+        # return True is a signal is processed, False otherwise
         raise NotImplementedError
 
 
@@ -61,13 +92,24 @@ class Dummy(Module):
     def send(self):
         pass
 
-    def receive(self, low_pulse, from_module):
-        if low_pulse:
+    def put(self, signal, sender):
+        if VERBOSE:
+            print(f"{self.name} received {signal} from {sender.name}")
+        if signal:
             self.count_low_pulses += 1
 
+    def tick(self):
+        return False
 
-class Button(Module):
-    """A module with a single button on it called the button module.
+
+class Broadcaster(Module):
+    """Model for both Broadcaster and Button modules.
+
+    There is a single broadcast module (named broadcaster).
+    When it receives a pulse, it sends the same pulse to all of
+    its destination modules.
+
+    A module with a single button on it called the button module.
     When you push the button, a single low pulse is sent directly to
     the broadcaster module.
     """
@@ -75,47 +117,14 @@ class Button(Module):
     def __init__(self, name):
         super().__init__(name)
 
-        # Constant and immutable stack, always send low pulse.
-        self.stack = [True]
-
-    def send(self):
-        # send a low pulse signal to broadcaster module
-        signal = self.stack[0]
-        self.counter[0] += 1
-        if VERBOSE:
-            print(f"{self.name} sent {signal} to {self.output_modules[0].name}")
-        self.output_modules[0].receive(signal, self)
-
-
-class Broadcaster(Module):
-    """There is a single broadcast module (named broadcaster).
-    When it receives a pulse, it sends the same pulse to all of
-    its destination modules.
-    """
-
-    def __init__(self, name):
-        super().__init__(name)
-
-    def send(self):
-        # send signals to output modules
-        signal = self.stack.pop(0)
-        for module in self.output_modules:
-            if VERBOSE:
-                print(f"{self.name} sent {signal} to {module.name}")
-            module.receive(signal, self)
-        for module in self.output_modules:
-            self.counter[0 if signal else 1] += 1
-            module.send()
-
-    def receive(self, low_pulse, from_module):
-        # receive signals from input modules
-        # Broadcaster module only has one input module,
-        # so we can just pass the signal to output modules
-        assert low_pulse, "Broadcaster module only receives low pulses"
-        if VERBOSE:
-            print(f"{self.name} received {low_pulse} from {from_module.name}")
-        self.stack.append(low_pulse)
-        self.send()
+    def tick(self):
+        # broadcaster and button only send low pulses
+        if not self.input_stack:
+            self.output_signal = None
+            return False
+        sender, signal = self.input_stack.popitem(last=False)
+        self.output_signal = signal
+        return True
 
 
 class FlipFlop(Module):
@@ -125,9 +134,6 @@ class FlipFlop(Module):
     receives a low pulse, it flips between on and off. If it was off,
     it turns on and sends a high pulse. If it was on, it turns off and
     sends a low pulse.
-
-    Here stack will have the length of input modules, and each pulse
-    received will be added to the stack, inclusing the Nones.
     """
 
     def __init__(self, name):
@@ -136,30 +142,20 @@ class FlipFlop(Module):
         # module state, can be "on" or "off"
         self.state = "off"
 
-    def receive(self, low_pulse, from_module):
-        if VERBOSE:
-            print(f"{self.name} received {low_pulse} from {from_module.name}")
-        if not low_pulse:
-            send_low_pulse = None
+    def tick(self):
+        if not self.input_stack:
+            self.output_signal = None
+            return False
+        sender, signal = self.input_stack.popitem(last=False)
+        if not signal:  # ignore high pulses and None pulses
+            self.output_signal = None
         elif self.state == "off":
             self.state = "on"
-            send_low_pulse = False
+            self.output_signal = False
         else:
             self.state = "off"
-            send_low_pulse = True
-        self.stack.append(send_low_pulse)
-
-    def send(self):
-        signal = self.stack.pop(0)
-        if signal is None:
-            return
-        for module in self.output_modules:
-            if VERBOSE:
-                print(f"{self.name} sent {signal} to {module.name}")
-            module.receive(signal, self)
-        for module in self.output_modules:
-            self.counter[0 if signal else 1] += 1
-            module.send()
+            self.output_signal = True
+        return True
 
 
 class Conjunction(Module):
@@ -178,29 +174,31 @@ class Conjunction(Module):
 
     def __init__(self, name):
         super().__init__(name)
+        self.stack_memory = None
 
-    def update_stack(self):
-        assert self.input_modules is not None, "Input modules not set"
-        self.stack = {mod: True for mod in self.input_modules}
+    def set_input_modules(self, input_modules):
+        self.input_modules = input_modules
+        # initialize memory with default low signal
+        self.stack_memory = {mod: True for mod in input_modules}
 
-    def receive(self, low_pulse, from_module):
+    def put(self, signal, sender):
+        # put signal to own's input stack
         if VERBOSE:
-            print(f"{self.name} received {low_pulse} from {from_module.name}")
-        self.stack[from_module] = low_pulse
+            print(f"{self.name} received {signal} from {sender.name}")
+        self.stack_memory[sender] = signal
+        self.input_stack[sender] = signal
 
-    def send(self):
-        send_low_signal = not any(self.stack.values())
-        for module in self.output_modules:
-            if VERBOSE:
-                print(f"{self.name} sent {send_low_signal} to {module.name}")
-            module.receive(send_low_signal, self)
-        for module in self.output_modules:
-            self.counter[0 if send_low_signal else 1] += 1
-            module.send()
+    def tick(self):
+        if not self.input_stack:
+            self.output_signal = None
+            return False
+        self.output_signal = not any(self.stack_memory.values())
+        self.input_stack.popitem(last=False)
+        return True
 
 
 def parse_input(data):
-    modules = {"button": Button("button")}
+    modules = {"button": Broadcaster("button")}
     out_modules_names = {"button": ["broadcaster"]}
     lines = data.strip().splitlines()
     for line in lines:
@@ -254,38 +252,78 @@ def parse_input(data):
     return modules
 
 
-def main(data, clicks=1000, part2=False):
+# %%
+
+
+def tick_all(modules):
+    """Tick all modules, ie, prepares output signals.
+    Return True if any module has a signal to send.
+    """
+    return any([m.tick() for m in modules.values()])
+
+
+def send_all(modules):
+    """Send all pending signals."""
+    [m.send() for m in modules.values()]
+
+
+def count_pulses(modules):
+    low, high = [0, 0]
+    for module in modules.values():
+        low += module.counter[0]
+        high += module.counter[1]
+    return low, high
+
+
+def check_state(modules):
+    """Return True is all modules have returned to their initial state,
+    ie, all Conjunction modules memories are True, and all FlipFlop
+    modules are off.
+    """
+    # initial_state = True
+    # print("  Modules' states:")
+    for mod in modules.values():
+        if isinstance(mod, Conjunction):
+            # print(f"\t{mod.name} memory: {mod.stack_memory.values()}")
+            if not all(mod.stack_memory.values()):
+                # initial_state = False
+                return False
+        elif isinstance(mod, FlipFlop):
+            # print(f"\t{mod.name} state: {mod.state}")
+            if mod.state != "off":
+                # initial_state = False
+                return False
+    # return initial_state
+    return True
+
+
+def click(modules):
+    """Push button and tick until all signals are processed."""
+    modules["button"].put(True, Dummy(""))
+    while tick_all(modules):
+        send_all(modules)
+
+
+def main(data, clicks=1000):
     modules = parse_input(data)
 
-    # init conjunction modules
-    for module in modules.values():
-        if isinstance(module, Conjunction):
-            module.update_stack()
+    for _ in range(clicks):
+        if VERBOSE:
+            print(f"  === Cycle {_ + 1} ===")
+        click(modules)
+        cycle_period = _ + 1
+        if check_state(modules):
+            print(f"  Repeated at cycle ", _ + 1)
+            break
+    else:
+        print("  Modules did not return to initial state.")
 
-    button = modules["button"]
-    if part2:
-        rx = modules["rx"]
-        f = open("day20_rx_pulses.txt", "w")
-
-    for i in range(clicks):
-        if part2:
-            rx.counter = [0, 0]
-        button.send()
-        if part2:
-            f.write(f"{i}\t{rx.counter[0]}\t{rx.counter[1]}\n")
-        # if part2 and rx.counter[0] == 1:
-        #     print("rx received a single pulse at i=", i)
-        #     exit()
-
-    pulse_counter = [0, 0]
-    for module in modules.values():
-        pulse_counter = (
-            pulse_counter[0] + module.counter[0],
-            pulse_counter[1] + module.counter[1],
-        )
-
-    print(pulse_counter[0], pulse_counter[1])
-    print(pulse_counter[0] * pulse_counter[1])
+    cycles = clicks / cycle_period
+    assert cycles.is_integer(), f"Cycles must be integer, got {cycles}"
+    cycles = int(cycles)
+    low, high = [cycles * p for p in count_pulses(modules)]
+    print(f"  low: {low}, high: {high}, product: {low * high}")
+    return low * high
 
 
 def example1():
@@ -297,7 +335,7 @@ broadcaster -> a, b, c
 %c -> inv
 &inv -> a
 """
-    main(data)
+    assert main(data, CLICKS) == 32000000
 
 
 def example2():
@@ -309,23 +347,26 @@ broadcaster -> a
 %b -> con
 &con -> output
 """
-    main(data)
+    assert main(data, CLICKS) == 11687500
 
 
 def part1():
     print("Part 1")
     data = open("day20.txt").read()
-    main(data)
+    assert main(data, CLICKS) == 879834312
 
 
 def part2():
     print("Part 2")
     data = open("day20.txt").read()
-    main(data, clicks=int(1e9), part2=True)
+    main(data, CLICKS, part2=True)
 
 
 VERBOSE = True
+CLICKS = 1000
 example1()
 example2()
 part1()
 # part2()
+
+# %%
